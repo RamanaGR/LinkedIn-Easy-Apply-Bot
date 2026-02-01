@@ -108,12 +108,17 @@ celerybeat.pid
 
 # Environments
 .env
+.env.local
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Sensitive data
+credentials.json
+secrets.yaml
 
 # Spyder project settings
 .spyderproject
@@ -148,3 +153,18 @@ venv8/
 quickstart.py
 states.json
 logs
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Project specific - Generated files
+*.csv
+output/
+data/
+qa.csv
+qa_memory.csv
+
+# Deprecated files
+_deprecated_trash/

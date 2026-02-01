@@ -1,37 +1,96 @@
-username: <username>
-password: <password>
-phone_number: <phone_number>
+# ============================================================================
+# LinkedIn Easy Apply Bot - Configuration File
+# ============================================================================
+# NOTE: Credentials (username, password, OpenAI API key) are loaded from .env
+# See .env.example for required environment variables
 
-profile_path: '' #can be empty, will default to 'C:\Users\<user>\AppData\Local\Google\Chrome\User Data\Default'
+# ============================================================================
+# Personal Information
+# ============================================================================
+phone_number: "7542757752"  # Your phone number for applications
 
+# Salary expectations
+salary: 160000  # Annual salary expectation (numeric, no commas)
+rate: 60        # Hourly rate expectation
 
+# ============================================================================
+# Job Search Preferences
+# ============================================================================
 positions:
-- Software Engineer
-
-
+  # - AI Engineer
+  - Generative AI Engineer
+  - Machine Learning Engineer
+  - MLOps Engineer
+  - Agentic AI Engineer
 locations:
-- Michigan
-- Remote
+  - San Francisco, CA
+  - United States
+  - Remote
+  # Uncomment additional locations as needed:
+  # - San Jose, CA
+  # - New York, NY
+  # - Los Angeles, CA
+  # - Chicago, IL
+  # - Boston, MA
+  # - Seattle, WA
+  # - Austin, TX
+  # - Dallas, TX
 
-salary: 60,000
-rate: 25
-# --------- Optional Parameters -------
-uploads:
-  Resume: /Users/steven/Desktop/LinkedIn-Easy-Apply-Bot/cv.pdf
-  Cover Letter: /Users/steven/Desktop/LinkedIn-Easy-Apply-Bot/cl.pdf
-  #Photo: # PATH TO photo
+# ============================================================================
+# Search Filters (Applied via URL Parameters)
+# ============================================================================
+search:
+  filters:
+    # Date Posted Filter
+    # Options: "24h" (past 24 hours), "week" (past week), "month" (past month), "any"
+    date_posted: "week"
+    
+    # Workplace Type Filter (can select multiple)
+    # Options: "remote", "hybrid", "onsite" (or "on-site")
+    workplace_type:
+      - remote
+      - hybrid
+      - onsite
 
-
-output_filename:
-- /Users/steven/Desktop/LinkedIn-Easy-Apply-Bot/out.csv
-
-# blacklist:
-# - # Company names you want to ignore
-
+# Experience Level Filter (can select multiple)
+# Options: "Internship", "Entry level", "Associate", "Mid-Senior level", "Director", "Executive"
 experience_level:
-  # - 1 # Entry level
-  # - 2 # Associate
-  # - 3 # Mid-Senior level
-  # - 4 # Director
-  # - 5 # Executive
-  # - 6 # Internship
+  - Associate
+  - Mid-Senior level
+
+# ============================================================================
+# File Uploads
+# ============================================================================
+uploads:
+  Resume: /Users/ram_surya/Documents/LinkedIn-Easy-Apply-Bot/Ramana_Gangarao_Resume.pdf
+  Cover Letter: /Users/ram_surya/Documents/LinkedIn-Easy-Apply-Bot/Ramana_Gangarao_Resume.pdf
+  # Photo: /path/to/photo.jpg  # Uncomment and add path if needed
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output_filename:
+  - output/applications.csv
+
+# ============================================================================
+# Blacklists (Optional)
+# ============================================================================
+# Companies to avoid (case-insensitive matching)
+blacklist: []
+  # - Company Name 1
+  # - Company Name 2
+
+# Job titles to avoid (case-insensitive matching)
+blackListTitles: []
+  # - Sales
+  # - Marketing
+
+# ============================================================================
+# Advanced Settings
+# ============================================================================
+# Require manual confirmation before submitting each application
+require_submission_confirmation: false
+
+# Maximum time to spend searching for jobs (in seconds)
+# Default: 3600 (1 hour)
+max_search_time: 3600
