@@ -16,25 +16,28 @@ rate: 60        # Hourly rate expectation
 # ============================================================================
 # Job Search Preferences
 # ============================================================================
+# Use double quotes for each position/location (recommended for keywords with spaces or special chars)
 positions:
-  # - AI Engineer
-  - Generative AI Engineer
-  - Machine Learning Engineer
-  - MLOps Engineer
-  - Agentic AI Engineer
+  - "AI Engineer"
+  - "Generative AI Engineer"
+  - "Agentic AI Engineer"
+  # Add more (keep double quotes):
+  # - "Machine Learning Engineer"
+  # - "MLOps Engineer"
+  # - "Data Scientist"
 locations:
-  - San Francisco, CA
-  - United States
-  - Remote
-  # Uncomment additional locations as needed:
-  # - San Jose, CA
-  # - New York, NY
-  # - Los Angeles, CA
-  # - Chicago, IL
-  # - Boston, MA
-  # - Seattle, WA
-  # - Austin, TX
-  # - Dallas, TX
+  - "United States"
+  - "Remote"
+  # Add more (keep double quotes):
+  # - "San Francisco, CA"
+  # - "New York, NY"
+  # - "San Jose, CA"
+  # - "Los Angeles, CA"
+  # - "Chicago, IL"
+  # - "Boston, MA"
+  # - "Seattle, WA"
+  # - "Austin, TX"
+  # - "Dallas, TX"
 
 # ============================================================================
 # Search Filters (Applied via URL Parameters)
@@ -43,7 +46,7 @@ search:
   filters:
     # Date Posted Filter
     # Options: "24h" (past 24 hours), "week" (past week), "month" (past month), "any"
-    date_posted: "week"
+    date_posted: "24h"
     
     # Workplace Type Filter (can select multiple)
     # Options: "remote", "hybrid", "onsite" (or "on-site")

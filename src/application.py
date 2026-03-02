@@ -8,7 +8,7 @@ import sys
 import glob
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any, Tuple
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -138,110 +138,156 @@ class AIQuestionAnswerer:
             logger.error(f"Error loading resume: {e}")
 
     def get_smart_answer(
-            self,
-            question_text: str,
-            context: Dict = None) -> Optional[str]:
+        self,
+        question_text: str,
+        context: Dict = None,
+        input_type: Optional[str] = None,
+        options: Optional[List[str]] = None,
+    ) -> Optional[str]:
         """
-        Get an intelligent answer to a job application question.
-        Returns None if uncertain (triggers human-in-the-loop learning).
+        Get an intelligent answer to a job application question, context-aware by input type.
 
         Args:
             question_text: The question to answer
             context: Optional context (salary, experience, etc.)
+            input_type: One of "text", "select", "radio", "checkbox", "toggle"
+            options: For select/radio: list of allowed option strings; for checkbox/toggle: ["Yes", "No"]
 
         Returns:
-            Answer string or None if uncertain
+            Answer string (exact option string for select/radio; "yes"/"no" or "true"/"false" for checkbox/toggle;
+            concise text for text fields), or None if uncertain.
         """
         question_lower = question_text.lower()
+        options = options or []
 
-        # Try AI first if available
         if self.client:
             try:
-                answer = self._get_ai_answer(question_text, context)
+                answer = self._get_ai_answer(
+                    question_text, context, input_type=input_type, options=options
+                )
                 if answer:
-                    logger.info(
-                        f"AI Answer: '{question_text[:50]}...' -> '{answer}'")
+                    logger.info(f"AI Answer: '{question_text[:50]}...' -> '{answer}'")
                     return answer
-                else:
-                    logger.debug(f"AI was uncertain about: '{question_text[:50]}...'")
-                    # DO NOT use fallback - return None to trigger human input
-                    return None
+                logger.debug(f"AI was uncertain about: '{question_text[:50]}...'")
+                return None
             except Exception as e:
-                logger.warning(f"AI answer failed: {e}")
+                logger.warning(f"AI answer failed: {e}", exc_info=True)
 
-        # Try very conservative fallback only for obvious cases
         fallback_answer = self._get_fallback_answer(question_lower, context)
         if fallback_answer:
             logger.debug(f"Using conservative fallback: '{fallback_answer}'")
             return fallback_answer
-        
-        # No answer available - return None to leave field blank
         return None
 
     def _get_ai_answer(
-            self,
-            question: str,
-            context: Dict = None) -> Optional[str]:
+        self,
+        question: str,
+        context: Dict = None,
+        input_type: Optional[str] = None,
+        options: Optional[List[str]] = None,
+    ) -> Optional[str]:
         """
-        Get answer from OpenAI with resume context.
-        Returns REQUIRES_HUMAN_INPUT if uncertain.
-
-        Args:
-            question: Question text
-            context: Additional context
-
-        Returns:
-            AI-generated answer, "REQUIRES_HUMAN_INPUT", or None
+        Get answer from OpenAI with resume context and input-type-specific instructions.
+        For select/radio: instructs LLM to return exact string from options.
+        For checkbox/toggle: instructs LLM to return yes/no or true/false.
+        For text: concise generation. Validates answer against options when provided.
         """
         if not self.client:
             return None
 
+        input_type = (input_type or "text").lower()
+        options = options or []
+
         try:
-            # Build context string
             context_str = ""
             if context:
                 context_str = f"\nAdditional Context: {context}"
-            
-            # Build resume context
+
             resume_context = ""
-            if self.resume_text:
-                # Use first 2000 chars to avoid token limits
+            has_resume = bool(self.resume_text and len(self.resume_text.strip()) > 50)
+            if has_resume:
                 resume_excerpt = self.resume_text[:2000]
                 resume_context = f"\n\nRESUME CONTEXT:\n{resume_excerpt}"
+            else:
+                resume_context = "\n\n(No resume context loaded. Answer from the question when reasonable; use REQUIRES_HUMAN_INPUT only for clearly personal/preference questions like salary, citizenship, relocation.)"
 
-            # Create prompt with strict instructions
-            prompt = f"""You are helping to fill out a job application form on LinkedIn.
+            # Type-specific instructions
+            if input_type in ("select", "radio") and options:
+                options_str = " | ".join(repr(o) for o in options)
+                type_rule = f"""You MUST respond with exactly one of these strings (copy character-for-character): {options_str}.
+Based on the resume, choose the option that best matches the candidate. Do not invent new text."""
 
-CRITICAL RULES:
-1. Answer ONLY based on the resume context provided below
-2. Keep answers short (1-3 words or a number)
-3. For yes/no questions, answer with ONLY "Yes" or "No"
-4. For years of experience, provide ONLY a number based on resume dates
-5. For personal preferences (salary expectations, specific citizenship status, willingness to relocate, etc.) that are NOT explicitly stated in the resume: Output exactly "REQUIRES_HUMAN_INPUT"
-6. If you are less than 90% confident in your answer: Output exactly "REQUIRES_HUMAN_INPUT"{resume_context}{context_str}
+            elif input_type in ("checkbox", "toggle"):
+                type_rule = """This is a checkbox or toggle. Respond with exactly one of: yes, no (or true, false).
+Based on the resume, should this box be CHECKED? E.g. "Do you have 5 years Python?" and resume shows 5 years -> yes."""
+
+            else:
+                type_rule = "Keep your answer concise (1-3 words or a number). Answer only from resume when possible."
+
+            prompt = f"""You are helping to fill out a LinkedIn Easy Apply form.
+
+RULES:
+1. When resume context is provided below, prefer answers from it. When it is missing or short, you may infer a reasonable answer from the question (e.g. yes/no for "Do you have X years experience?" if the question implies a threshold).
+2. {type_rule}
+3. For clearly personal/preference questions (citizenship, relocation, exact salary) not in resume: output exactly REQUIRES_HUMAN_INPUT.
+4. If you are genuinely uncertain and cannot infer, output exactly REQUIRES_HUMAN_INPUT.{resume_context}{context_str}
 
 Question: {question}
 
-Answer (or output exactly "REQUIRES_HUMAN_INPUT" if uncertain/preference):"""
+Answer (or exactly "REQUIRES_HUMAN_INPUT" if uncertain):"""
 
-            # Call OpenAI API
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a precise job application assistant. Follow ALL rules strictly. Output 'REQUIRES_HUMAN_INPUT' when uncertain."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": "You are a precise job application assistant. Return only the answer string or REQUIRES_HUMAN_INPUT.",
+                    },
+                    {"role": "user", "content": prompt},
                 ],
                 max_tokens=100,
-                temperature=0.3  # Lower temperature for more deterministic answers
+                temperature=0.2,
             )
 
-            answer = response.choices[0].message.content.strip()
-            
-            # Check if AI explicitly indicated uncertainty
-            if answer == "REQUIRES_HUMAN_INPUT" or not answer:
-                logger.debug(f"AI returned REQUIRES_HUMAN_INPUT for: {question[:50]}...")
+            raw = (response.choices[0].message.content or "").strip()
+            answer = " ".join(raw.split()).strip().rstrip(".").strip()
+            if answer.upper() == "REQUIRES_HUMAN_INPUT" or not answer:
                 return None
-            
+
+            # Normalize checkbox/toggle to yes/no (accept "Yes.", "YES", "true", etc.)
+            if input_type in ("checkbox", "toggle"):
+                alower = answer.lower()
+                if alower in ("true", "yes", "1", "checked", "y"):
+                    return "yes"
+                if alower in ("false", "no", "0", "unchecked", "n"):
+                    return "no"
+                if alower.startswith("yes") or alower == "y":
+                    return "yes"
+                if alower.startswith("no"):
+                    return "no"
+                return None
+
+            # For select/radio: validate; allow exact, case-insensitive, fuzzy 80%, or partial match
+            if options and input_type in ("select", "radio"):
+                if answer in options:
+                    return answer
+                for opt in options:
+                    if (opt or "").strip().lower() == (answer or "").strip().lower():
+                        return opt
+                for opt in options:
+                    if answer.strip().lower() in (opt or "").strip().lower():
+                        return opt
+                    if (opt or "").strip().lower() in answer.strip().lower():
+                        return opt
+                try:
+                    from thefuzz import fuzz, process
+                    best = process.extractOne(answer, options, scorer=fuzz.ratio)
+                    if best and len(best) >= 2 and best[1] >= 80:
+                        return best[0]
+                except Exception:
+                    pass
+                return None
+
             return answer
 
         except Exception as e:
@@ -702,16 +748,16 @@ class JobApplication:
 
     def _answer_questions(self):
         """
-        Answer form questions using self-learning Q&A system.
+        Answer form questions using self-learning Q&A system with context-aware AI.
         
         Process:
-        1. Identify question text from label
+        1. Analyze each form group (question text, input type, available options)
         2. Lookup answer in qa_memory.csv
-        3. If found: Auto-fill
-        4. If not found: Pause, prompt user, learn, fill
+        3. If not in memory: AI gets smart answer with input_type and options (resume-aware)
+        4. If options provided and LLM answer not in list: fallback (fuzzy match or leave blank)
+        5. Fill field using type-specific logic (dropdown/radio/checkbox/toggle/text)
         """
         try:
-            # Find all form fields
             form_groups = self.driver.find_elements(
                 By.CLASS_NAME,
                 "jobs-easy-apply-form-section__grouping"
@@ -721,57 +767,102 @@ class JobApplication:
                 "salary": self.config.salary,
                 "rate": self.config.rate
             }
-            
+
             logger.debug(f"Found {len(form_groups)} form field groups to process")
 
             for group in form_groups:
                 if not group.is_displayed():
                     continue
 
-                # STEP A: Identify Question
-                question_text = self._extract_question_text(group)
-                if not question_text:
+                # STEP A: Analyze form element (question, input type, options)
+                analysis = self._analyze_form_element(group)
+                if not analysis:
                     logger.debug("No question text extracted from form group")
                     continue
-                
-                logger.debug(f"Processing question: '{question_text[:60]}...'")
+
+                question_text = analysis["question_text"]
+                input_type = analysis["input_type"]
+                options = analysis.get("options") or []
+
+                logger.debug(
+                    f"Processing: '{question_text[:50]}...' type={input_type} options={len(options)}"
+                )
 
                 # STEP B: Lookup Answer in Memory
                 answer = self.qa_manager.lookup_answer(question_text)
 
                 if answer:
-                    # FOUND IN MEMORY
-                    logger.info(f"✅ [MEMORY] Found answer for: '{question_text[:40]}...' -> '{answer}'")
+                    logger.info(
+                        f"✅ [MEMORY] Found answer for: '{question_text[:40]}...' -> '{answer}'"
+                    )
                 else:
-                    # NOT FOUND IN MEMORY - Try AI 
                     logger.warning(f"❌ Not in memory: '{question_text[:60]}...'")
-                    
-                    # Try AI-powered answer (if available)
                     if self.ai_answerer.client:
-                        logger.info(f"🤖 Trying AI-powered answer...")
-                        answer = self.ai_answerer.get_smart_answer(question_text, context)
+                        logger.info("🤖 Trying AI-powered answer...")
+                        answer = self.ai_answerer.get_smart_answer(
+                            question_text,
+                            context,
+                            input_type=input_type,
+                            options=options,
+                        )
                         if answer:
                             logger.info(f"✅ [AI] Generated answer: '{answer}'")
-                            # Save AI answer to memory for future use
                             self.qa_manager.learn_answer(question_text, answer)
-                            logger.info(f"💾 Saved AI answer to memory")
+                            logger.info("💾 Saved AI answer to memory")
                         else:
-                            logger.warning(f"AI was uncertain or returned None")
+                            logger.warning("AI was uncertain or returned None")
 
-                # STEP C: Fill the field with answer (or leave blank if None)
+                # STEP C: If we have options and answer not in list (hallucination), fallback
+                if answer and options:
+                    answer = self._resolve_answer_to_option(answer, options, question_text)
+                    if answer is None:
+                        logger.warning(
+                            f"⚠️ LLM answer not in options; leaving blank for human validation."
+                        )
+
+                # STEP D: Fill the field (or leave blank if no answer)
                 if answer:
                     logger.debug(f"Attempting to fill field with answer: '{answer}'")
-                    self._fill_field_with_answer(group, answer)
+                    self._fill_field_with_answer(
+                        group, answer, input_type=input_type, options=options
+                    )
                 else:
-                    # NO ANSWER AVAILABLE - Leave field blank
-                    # This will trigger validation error (red text) which will call
-                    # _handle_validation_errors_with_learning() and prompt user
-                    logger.warning(f"⚠️ Answer not found/generated. Leaving blank to trigger validation loop.")
+                    logger.warning(
+                        "⚠️ Answer not found/generated. Leaving blank to trigger validation loop."
+                    )
                     logger.warning(f"   Question: '{question_text[:60]}...'")
-                    logger.warning(f"   This will pause for user input when validation runs.")
 
         except Exception as e:
             logger.error(f"Error in question answering: {e}", exc_info=True)
+
+    def _resolve_answer_to_option(
+        self, answer: str, options: List[str], question_text: str
+    ) -> Optional[str]:
+        """
+        Resolve LLM answer to an exact option when options are provided (dropdown/radio).
+        Handles hallucination: if answer not in options, try fuzzy match; else leave blank.
+        """
+        if not answer or not options:
+            return answer
+        answer_clean = answer.strip()
+        for opt in options:
+            if (opt or "").strip() == answer_clean:
+                return opt
+        for opt in options:
+            if (opt or "").strip().lower() == answer_clean.lower():
+                return opt
+        for opt in options:
+            if answer_clean.lower() in (opt or "").strip().lower():
+                return opt
+        try:
+            from thefuzz import fuzz, process
+            best = process.extractOne(answer_clean, options, scorer=fuzz.ratio)
+            if best and len(best) >= 2 and best[1] >= 75:
+                logger.info(f"✅ Resolved LLM answer to option: '{answer_clean}' -> '{best[0]}'")
+                return best[0]
+        except Exception:
+            pass
+        return None
 
     def _extract_question_text(self, group_element) -> Optional[str]:
         """
@@ -967,75 +1058,295 @@ class JobApplication:
         
         return text.strip()
 
-    def _fill_field_with_answer(self, group_element, answer: str):
+    def _analyze_form_element(self, group_element) -> Optional[Dict[str, Any]]:
         """
-        Fill a form field with the provided answer.
+        Analyze a form group to identify input type and available options.
+        Used for context-aware AI form filling (dropdowns, radios, checkboxes, toggles, text).
+
+        Returns:
+            Dict with keys: question_text, input_type, options.
+            input_type is one of: "text", "select", "radio", "checkbox", "toggle".
+            options: for select/radio, list of option strings; for checkbox/toggle, ["Yes", "No"]; for text, [].
+            None if question text cannot be extracted.
+        """
+        question_text = self._extract_question_text(group_element)
+        if not question_text:
+            return None
+
+        input_type = "text"
+        options: List[str] = []
+
+        try:
+            # 1) Native <select> dropdown
+            selects = group_element.find_elements(By.TAG_NAME, "select")
+            if selects and selects[0].is_displayed():
+                from selenium.webdriver.support.ui import Select
+                sel = Select(selects[0])
+                options = [(opt.text or "").strip() for opt in sel.options if (opt.text or "").strip()]
+                if options:
+                    input_type = "select"
+                    return {"question_text": question_text, "input_type": input_type, "options": options}
+
+            # 2) Custom dropdown (LinkedIn often uses div + li)
+            custom_dropdown = group_element.find_elements(
+                By.CSS_SELECTOR,
+                "[role='listbox'] li, .artdeco-dropdown__item, [data-test-dropdown-option]"
+            )
+            if custom_dropdown:
+                opts = []
+                for li in custom_dropdown:
+                    if li.is_displayed():
+                        t = (li.text or "").strip()
+                        if t and t not in opts:
+                            opts.append(t)
+                if opts:
+                    input_type = "select"
+                    return {"question_text": question_text, "input_type": input_type, "options": opts}
+
+            # 3) Radio buttons
+            radios = group_element.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            if radios and any(r.is_displayed() for r in radios):
+                opts = []
+                for radio in radios:
+                    if not radio.is_displayed():
+                        continue
+                    rid = radio.get_attribute("id")
+                    label_text = ""
+                    if rid:
+                        try:
+                            label_el = group_element.find_element(By.CSS_SELECTOR, f"label[for='{rid}']")
+                            label_text = (label_el.text or "").strip()
+                        except Exception:
+                            pass
+                    val = (radio.get_attribute("value") or "").strip()
+                    candidate = label_text or val
+                    if candidate and candidate not in opts:
+                        opts.append(candidate)
+                if opts:
+                    input_type = "radio"
+                    return {"question_text": question_text, "input_type": input_type, "options": opts}
+
+            # 4) Checkbox(es)
+            checkboxes = group_element.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            if checkboxes and any(c.is_displayed() for c in checkboxes):
+                input_type = "checkbox"
+                return {"question_text": question_text, "input_type": input_type, "options": ["Yes", "No"]}
+
+            # 5) Toggle (role=switch or aria role)
+            toggles = group_element.find_elements(
+                By.CSS_SELECTOR,
+                "[role='switch'], button[aria-pressed], .artdeco-toggle, [data-test-toggle]"
+            )
+            if toggles and any(t.is_displayed() for t in toggles):
+                input_type = "toggle"
+                return {"question_text": question_text, "input_type": input_type, "options": ["Yes", "No"]}
+
+            # 6) Text / textarea / number / email / tel
+            text_inputs = group_element.find_elements(
+                By.CSS_SELECTOR,
+                "input[type='text'], input[type='email'], input[type='number'], input[type='tel'], textarea"
+            )
+            if text_inputs and any(i.is_displayed() for i in text_inputs):
+                input_type = "text"
+                return {"question_text": question_text, "input_type": input_type, "options": []}
+
+        except Exception as e:
+            logger.debug(f"Error analyzing form element: {e}")
+
+        return {"question_text": question_text, "input_type": input_type, "options": options}
+
+    def _fill_field_with_answer(
+        self,
+        group_element,
+        answer: str,
+        input_type: Optional[str] = None,
+        options: Optional[List[str]] = None,
+    ):
+        """
+        Fill a form field with the provided answer, using input-type-specific logic.
 
         Args:
             group_element: The form group WebElement
-            answer: The answer to fill
+            answer: The answer to fill (exact option string for select/radio; yes/no for checkbox/toggle; text otherwise)
+            input_type: One of "text", "select", "radio", "checkbox", "toggle" (optional; auto-detected if None)
+            options: List of allowed options for select/radio (used for exact/partial match)
         """
         try:
-            # Text inputs
+            it = (input_type or "").lower()
+            answer_clean = (answer or "").strip().lower()
+
+            # --- Checkbox: check if answer is yes/true, uncheck if no/false ---
+            if it == "checkbox":
+                checkboxes = group_element.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+                for cb in checkboxes:
+                    if not cb.is_displayed():
+                        continue
+                    should_be_checked = answer_clean in ("yes", "true", "1", "checked")
+                    if cb.is_selected() != should_be_checked:
+                        StealthUtils.smooth_scroll_to_element(self.driver, cb)
+                        StealthUtils.human_sleep(0.2, 0.5)
+                        cb.click()
+                        logger.debug(f"Checkbox {'checked' if should_be_checked else 'unchecked'}: {answer}")
+                    return
+
+            # --- Toggle: same as checkbox (click to set on/off) ---
+            if it == "toggle":
+                toggles = group_element.find_elements(
+                    By.CSS_SELECTOR,
+                    "[role='switch'], button[aria-pressed], .artdeco-toggle, [data-test-toggle]",
+                )
+                for tg in toggles:
+                    if not tg.is_displayed():
+                        continue
+                    should_be_on = answer_clean in ("yes", "true", "1")
+                    is_on = tg.get_attribute("aria-checked") == "true" or tg.get_attribute("aria-pressed") == "true"
+                    if is_on != should_be_on:
+                        StealthUtils.smooth_scroll_to_element(self.driver, tg)
+                        StealthUtils.human_sleep(0.2, 0.5)
+                        tg.click()
+                        logger.debug(f"Toggle set to {'on' if should_be_on else 'off'}: {answer}")
+                    return
+
+            # --- Select (native <select>): exact then partial match on option text ---
+            if it == "select":
+                selects = group_element.find_elements(By.TAG_NAME, "select")
+                if selects and selects[0].is_displayed():
+                    from selenium.webdriver.support.ui import Select
+                    sel = Select(selects[0])
+                    for opt in sel.options:
+                        t = (opt.text or "").strip()
+                        if t and (answer.strip() == t or answer_clean == t.lower()):
+                            sel.select_by_visible_text(t)
+                            logger.debug(f"Selected dropdown (exact): {t}")
+                            return
+                    for opt in sel.options:
+                        t = (opt.text or "").strip()
+                        if t and answer_clean in t.lower():
+                            sel.select_by_visible_text(t)
+                            logger.debug(f"Selected dropdown (partial): {t}")
+                            return
+                # Custom dropdown (li / listbox)
+                items = group_element.find_elements(
+                    By.CSS_SELECTOR,
+                    "[role='listbox'] li, .artdeco-dropdown__item, [data-test-dropdown-option]",
+                )
+                for li in items:
+                    if not li.is_displayed():
+                        continue
+                    t = (li.text or "").strip()
+                    if t and (answer.strip() == t or answer_clean in t.lower()):
+                        StealthUtils.smooth_scroll_to_element(self.driver, li)
+                        li.click()
+                        logger.debug(f"Selected custom option: {t}")
+                        return
+
+            # --- Radio: click the option that matches the answer (by label or value) ---
+            if it == "radio":
+                radios = group_element.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+                for radio in radios:
+                    if not radio.is_displayed():
+                        continue
+                    val = (radio.get_attribute("value") or "").strip().lower()
+                    label_text = ""
+                    try:
+                        rid = radio.get_attribute("id")
+                        if rid:
+                            label_el = group_element.find_element(By.CSS_SELECTOR, f"label[for='{rid}']")
+                            label_text = (label_el.text or "").strip().lower()
+                    except Exception:
+                        pass
+                    if answer_clean == val or answer_clean == label_text or answer_clean in label_text or answer_clean in val:
+                        StealthUtils.smooth_scroll_to_element(self.driver, radio)
+                        StealthUtils.human_sleep(0.2, 0.5)
+                        try:
+                            label_el = group_element.find_element(By.CSS_SELECTOR, f"label[for='{radio.get_attribute('id')}']")
+                            label_el.click()
+                        except Exception:
+                            radio.click()
+                        logger.debug(f"Selected radio: {answer}")
+                        return
+
+            # --- Text / default: try text input, then legacy radio/select order ---
             text_inputs = group_element.find_elements(By.TAG_NAME, "input")
             for input_field in text_inputs:
-                if input_field.get_attribute(
-                        "type") == "text" and input_field.is_displayed():
-                    if not input_field.get_attribute("value"):
-                        StealthUtils.type_like_human(input_field, answer)
-                        logger.debug(f"Filled text field: {answer}")
-                        return
+                if (
+                    input_field.get_attribute("type") == "text"
+                    and input_field.is_displayed()
+                    and (not input_field.get_attribute("value") or input_field.get_attribute("value") == "")
+                ):
+                    StealthUtils.smooth_scroll_to_element(self.driver, input_field)
+                    StealthUtils.human_sleep(0.2, 0.4)
+                    StealthUtils.type_like_human(input_field, answer)
+                    logger.debug(f"Filled text field: {answer}")
+                    return
 
-            # Radio buttons
-            radio_buttons = group_element.find_elements(
-                By.CSS_SELECTOR, "input[type='radio']")
-            if radio_buttons:
+            for input_field in group_element.find_elements(
+                By.CSS_SELECTOR,
+                "input[type='email'], input[type='number'], input[type='tel']",
+            ):
+                if (
+                    input_field.is_displayed()
+                    and (not input_field.get_attribute("value") or input_field.get_attribute("value") == "")
+                ):
+                    StealthUtils.smooth_scroll_to_element(self.driver, input_field)
+                    StealthUtils.human_sleep(0.2, 0.4)
+                    StealthUtils.type_like_human(input_field, answer)
+                    logger.debug(f"Filled input: {answer}")
+                    return
+
+            textareas = group_element.find_elements(By.TAG_NAME, "textarea")
+            for ta in textareas:
+                if ta.is_displayed() and (not ta.get_attribute("value") or ta.get_attribute("value") == ""):
+                    StealthUtils.smooth_scroll_to_element(self.driver, ta)
+                    StealthUtils.human_sleep(0.2, 0.4)
+                    StealthUtils.type_like_human(ta, answer)
+                    logger.debug(f"Filled textarea: {answer}")
+                    return
+
+            # Legacy: radio (when input_type not set)
+            if not it:
+                radio_buttons = group_element.find_elements(By.CSS_SELECTOR, "input[type='radio']")
                 for radio in radio_buttons:
-                    radio_value = radio.get_attribute("value") or ""
+                    if not radio.is_displayed():
+                        continue
+                    radio_value = (radio.get_attribute("value") or "").lower()
                     radio_label = ""
                     try:
-                        # Try to get the label text for this radio button
-                        radio_id = radio.get_attribute("id")
-                        if radio_id:
-                            label = group_element.find_element(
-                                By.CSS_SELECTOR, f"label[for='{radio_id}']")
-                            radio_label = label.text.strip()
-                    except:
+                        rid = radio.get_attribute("id")
+                        if rid:
+                            label = group_element.find_element(By.CSS_SELECTOR, f"label[for='{rid}']")
+                            radio_label = (label.text or "").strip().lower()
+                    except Exception:
                         pass
-
-                    # Match answer to radio value or label
-                    if (answer.lower() in radio_value.lower() or
-                            answer.lower() in radio_label.lower()):
-                        radio.click()
-                        logger.debug(
-                            f"Selected radio: {radio_value or radio_label}")
+                    if answer_clean in radio_value or answer_clean in radio_label:
+                        StealthUtils.smooth_scroll_to_element(self.driver, radio)
+                        try:
+                            label = group_element.find_element(By.CSS_SELECTOR, f"label[for='{radio.get_attribute('id')}']")
+                            label.click()
+                        except Exception:
+                            radio.click()
+                        logger.debug(f"Selected radio: {answer}")
                         return
 
-            # Dropdowns
-            selects = group_element.find_elements(By.TAG_NAME, "select")
-            for select in selects:
-                if select.is_displayed():
-                    from selenium.webdriver.support.ui import Select
-                    select_element = Select(select)
-                    try:
-                        # Try exact match first
-                        select_element.select_by_visible_text(answer)
-                        logger.debug(f"Selected dropdown: {answer}")
-                        return
-                    except:
-                        # Try partial match
-                        for option in select_element.options:
-                            if answer.lower() in option.text.lower():
-                                option.click()
-                                logger.debug(
-                                    f"Selected dropdown (partial): {option.text}")
-                                return
-
-                        # Fallback to first non-empty option
-                        if len(select_element.options) > 1:
-                            select_element.select_by_index(1)
-                            logger.debug("Selected default dropdown option")
+                selects = group_element.find_elements(By.TAG_NAME, "select")
+                for select in selects:
+                    if select.is_displayed():
+                        from selenium.webdriver.support.ui import Select
+                        sel = Select(select)
+                        try:
+                            sel.select_by_visible_text(answer)
+                            logger.debug(f"Selected dropdown: {answer}")
                             return
+                        except Exception:
+                            for opt in sel.options:
+                                if answer_clean in (opt.text or "").lower():
+                                    sel.select_by_visible_text(opt.text)
+                                    logger.debug(f"Selected dropdown (partial): {opt.text}")
+                                    return
+                            if len(sel.options) > 1:
+                                sel.select_by_index(1)
+                                logger.debug("Selected default dropdown option")
+                                return
 
         except Exception as e:
             logger.debug(f"Could not fill field: {e}")

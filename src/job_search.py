@@ -2,8 +2,8 @@
 Job search and filtering functionality.
 """
 
-import random
 from typing import List, Dict, Tuple, Set
+from urllib.parse import quote
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -52,11 +52,15 @@ class JobSearch:
         """
         base_url = "https://www.linkedin.com/jobs/search/"
 
+        # Wrap keywords in double quotes so LinkedIn searches for the exact phrase (e.g. "AI Engineer")
+        keywords_phrase = f'"{position.strip()}"'
+        keywords_encoded = quote(keywords_phrase, safe="")
+
         # Build query parameters
         params = {
             "f_AL": "true",  # Easy Apply filter (always enabled)
-            "keywords": position.replace(" ", "%20"),
-            "location": location.replace(" ", "%20"),
+            "keywords": keywords_encoded,
+            "location": quote(location.strip(), safe=""),
             "start": str(page * 25)
         }
 

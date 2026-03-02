@@ -22,12 +22,15 @@ class Config:
         Args:
             config_file: Path to YAML configuration file
         """
-        # Load environment variables
-        load_dotenv()
-
-        # Load YAML configuration
+        # Load YAML configuration first to resolve paths
         self.config_file = Path(config_file)
         self._load_config()
+
+        # Load .env from project root (directory of config file) so key is found when run from any cwd
+        env_path = self.config_file.resolve().parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        load_dotenv()  # Also try cwd for backward compatibility
 
         # Load credentials from environment
         self._load_credentials()
@@ -48,9 +51,13 @@ class Config:
 
     def _load_credentials(self):
         """Load credentials from environment variables."""
-        self.username = os.getenv('LINKEDIN_USERNAME')
-        self.password = os.getenv('LINKEDIN_PASSWORD')
-        self.openai_api_key = os.getenv('OPENAI_API_KEY')
+        def _getenv(key: str) -> Optional[str]:
+            val = os.getenv(key)
+            return val.strip() if isinstance(val, str) else val
+
+        self.username = _getenv('LINKEDIN_USERNAME')
+        self.password = _getenv('LINKEDIN_PASSWORD')
+        self.openai_api_key = _getenv('OPENAI_API_KEY')
 
         if not self.username or not self.password:
             logger.critical(
@@ -63,6 +70,8 @@ class Config:
         if not self.openai_api_key:
             logger.warning(
                 "OPENAI_API_KEY not set - AI features will be limited")
+        else:
+            logger.info("OPENAI_API_KEY loaded - AI form filling enabled")
 
     @property
     def phone_number(self) -> Optional[str]:

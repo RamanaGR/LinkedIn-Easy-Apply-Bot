@@ -163,6 +163,7 @@ logs
 *.csv
 output/
 data/
+crash_dumps/
 qa.csv
 qa_memory.csv
 
