@@ -58,6 +58,9 @@ class Config:
         self.username = _getenv('LINKEDIN_USERNAME')
         self.password = _getenv('LINKEDIN_PASSWORD')
         self.openai_api_key = _getenv('OPENAI_API_KEY')
+        self.ai_provider = _getenv('AI_PROVIDER') or "ollama"
+        self.ollama_base_url = _getenv('OLLAMA_BASE_URL') or "http://127.0.0.1:11434"
+        self.ollama_model = _getenv('OLLAMA_MODEL') or ""
 
         if not self.username or not self.password:
             logger.critical(
@@ -67,11 +70,37 @@ class Config:
 
         logger.info(f"Credentials loaded for user: {self.username[:3]}***")
 
-        if not self.openai_api_key:
-            logger.warning(
-                "OPENAI_API_KEY not set - AI features will be limited")
+        provider = (self.ai_provider or "ollama").lower().strip()
+        logger.info(f"AI provider configured: {provider}")
+
+        if provider == "openai":
+            if not self.openai_api_key:
+                logger.warning(
+                    "OPENAI_API_KEY not set while AI_PROVIDER=openai - AI features will be limited"
+                )
+            else:
+                logger.info("OPENAI_API_KEY loaded - AI form filling enabled")
         else:
-            logger.info("OPENAI_API_KEY loaded - AI form filling enabled")
+            if self.openai_api_key:
+                logger.info("OPENAI_API_KEY present (optional fallback)")
+            logger.info(
+                f"Ollama base URL: {self.ollama_base_url} (model: {self.ollama_model or 'auto'})"
+            )
+
+    @property
+    def ai_provider_name(self) -> str:
+        """Return configured AI provider (ollama/openai/none)."""
+        return (self.ai_provider or "ollama").lower().strip()
+
+    @property
+    def ollama_base_url_value(self) -> str:
+        """Return Ollama base URL."""
+        return self.ollama_base_url
+
+    @property
+    def ollama_model_value(self) -> str:
+        """Return Ollama model string (may be empty to auto-select)."""
+        return self.ollama_model
 
     @property
     def phone_number(self) -> Optional[str]:

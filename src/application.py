@@ -6,6 +6,7 @@ import csv
 import time
 import sys
 import glob
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
@@ -18,6 +19,7 @@ from src.config import Config
 from src.logger import get_logger
 from src.utils import StealthUtils
 from src.qa_manager import QAMemoryManager
+from src.ollama_client import OllamaClient, OllamaChatMessage
 
 logger = get_logger()
 
@@ -28,17 +30,28 @@ class DailyLimitReachedException(Exception):
 
 
 class AIQuestionAnswerer:
-    """AI-powered question answering using OpenAI with resume context."""
+    """LLM-powered question answering using Ollama or OpenAI with resume context."""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        api_key: Optional[str] = None,
+    ):
         """
         Initialize AI question answerer with resume parsing.
 
         Args:
-            api_key: OpenAI API key
+            config: Config object (preferred; enables Ollama provider)
+            api_key: OpenAI API key (optional; used when config is not provided)
         """
-        self.api_key = api_key
-        self.client = None
+        self.config = config
+        self.client = None  # OpenAI client (if using OpenAI)
+
+        self.ollama_client: Optional[OllamaClient] = None
+        self.ollama_model: str = ""
+        self.provider: str = "none"
+        self.llm_enabled: bool = False
+
         self.resume_text = ""
 
         # Parse resume from assets/ folder
@@ -48,94 +61,294 @@ class AIQuestionAnswerer:
         logger.info("=" * 80)
         logger.info("AI INITIALIZATION DEBUG")
         logger.info("=" * 80)
-        
-        if api_key:
-            # Mask API key for logging (show first 7 and last 4 chars)
-            masked_key = f"{api_key[:7]}...{api_key[-4:]}" if len(api_key) > 11 else "***"
-            logger.info(f"✅ OpenAI API key provided: {masked_key}")
-            
-            try:
-                import openai
-                logger.info(f"✅ OpenAI library version: {openai.__version__}")
-                
-                self.client = openai.OpenAI(api_key=api_key)
-                logger.info("✅ OpenAI client initialized successfully")
-                logger.info(f"✅ AI-powered answering: ENABLED")
-                
-                # Test API connectivity (optional, lightweight check)
-                try:
-                    # Quick validation that the client is working
-                    logger.info("✅ OpenAI client ready for question answering")
-                except Exception as e:
-                    logger.warning(f"⚠️ OpenAI client created but validation failed: {e}")
-                    
-            except ImportError:
-                logger.error("❌ OpenAI library not installed!")
-                logger.error("   Install with: pip install openai")
-                logger.warning("   AI features DISABLED - using fallback answers")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize OpenAI client: {e}")
-                logger.warning("   AI features DISABLED - using fallback answers")
+
+        if config is not None:
+            self.provider = (getattr(config, "ai_provider_name", "ollama") or "ollama").lower().strip()
         else:
-            logger.warning("❌ No OpenAI API key provided in config.yaml or .env")
-            logger.warning("   Set OPENAI_API_KEY in your .env file")
-            logger.warning("   AI features DISABLED - using fallback answers only")
-        
+            # Backwards compatibility: if an API key is passed, assume OpenAI
+            self.provider = "openai" if api_key else "none"
+
+        if self.provider == "openai":
+            effective_key = api_key or (config.openai_api_key if config else None)
+            if not effective_key:
+                logger.warning("❌ No OpenAI API key available for AI_PROVIDER=openai")
+            else:
+                # Mask API key for logging (show first 7 and last 4 chars)
+                masked_key = (
+                    f"{effective_key[:7]}...{effective_key[-4:]}"
+                    if len(effective_key) > 11
+                    else "***"
+                )
+                logger.info(f"✅ OpenAI API key provided: {masked_key}")
+
+                try:
+                    import openai
+
+                    logger.info(f"✅ OpenAI library version: {openai.__version__}")
+                    self.client = openai.OpenAI(api_key=effective_key)
+                    self.llm_enabled = True
+                    logger.info("✅ OpenAI client initialized successfully")
+                except ImportError:
+                    logger.error("❌ OpenAI library not installed!")
+                    logger.error("   Install with: pip install openai")
+                    self.client = None
+                    self.llm_enabled = False
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+                    self.client = None
+                    self.llm_enabled = False
+
+        elif self.provider == "ollama":
+            if not config:
+                logger.warning("❌ Ollama provider selected but no Config provided")
+            else:
+                base_url = config.ollama_base_url_value
+                pinned_model = config.ollama_model_value
+                logger.info(
+                    f"✅ Ollama provider selected (base_url={base_url}, model={pinned_model or 'auto'})"
+                )
+                try:
+                    self.ollama_client = OllamaClient(
+                        base_url=base_url,
+                        model=pinned_model,
+                    )
+                    chosen = self.ollama_client.resolve_model()
+                    self.ollama_model = chosen or ""
+                    self.llm_enabled = bool(self.ollama_model)
+                    if self.llm_enabled:
+                        logger.info(f"🤖 Ollama model ready: {self.ollama_model}")
+                    else:
+                        logger.warning("⚠️ Ollama model could not be resolved; using fallbacks only")
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize Ollama client: {e}")
+                    self.ollama_client = None
+                    self.llm_enabled = False
+        else:
+            logger.warning(f"⚠️ Unknown AI_PROVIDER={self.provider}. Using fallbacks only.")
+
         logger.info("=" * 80)
-        
-        # Summary
-        if self.client:
+
+        if self.llm_enabled:
             logger.info("🤖 AI Question Answering: ACTIVE")
         else:
             logger.info("⚠️  AI Question Answering: INACTIVE (using fallbacks only)")
     
     def _load_resume(self):
         """
-        Load and parse resume PDF from assets/ or workspace root.
-        Stores extracted text in self.resume_text.
+        Load and parse resume context.
+
+        Preference order:
+        1) JSON resume (assets/*.json) -> flattened into self.resume_text
+        2) PDF resume (assets/*.pdf / root) -> extracted into self.resume_text
         """
+        self.resume_text = ""
+
+        # 1) Try JSON first (fast + no pypdf requirement)
         try:
-            # Search for PDF files in multiple locations
+            json_candidates = []
+            for pattern in ("assets/*.json", "*.json"):
+                json_candidates.extend(glob.glob(pattern))
+
+            # Prefer resume-like JSON filenames
+            filtered = []
+            for p in json_candidates:
+                name = Path(p).name.lower()
+                if "resume" in name or "cv" in name:
+                    filtered.append(p)
+
+            for candidate in filtered:
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    flattened = self._flatten_resume_json(data)
+                    if flattened and len(flattened.strip()) > 50:
+                        self.resume_text = flattened
+                        logger.info(f"✅ Loaded resume JSON from: {candidate}")
+                        logger.info(f"Resume text length: {len(self.resume_text)} characters")
+                        return
+                except Exception as e:
+                    logger.debug(f"Failed parsing resume JSON candidate {candidate}: {e}")
+        except Exception as e:
+            logger.debug(f"Resume JSON loading failed: {e}")
+
+        # 2) Fallback to PDF
+        try:
             search_paths = [
                 "assets/*.pdf",
                 "*.pdf",
                 "resume*.pdf",
-                "cv*.pdf"
+                "cv*.pdf",
             ]
-            
+
             pdf_file = None
             for pattern in search_paths:
                 pdf_files = glob.glob(pattern)
                 if pdf_files:
-                    pdf_file = pdf_files[0]  # Use first match
+                    pdf_file = pdf_files[0]
                     break
-            
+
             if not pdf_file:
                 logger.warning("⚠️ No resume PDF found in assets/ or workspace root")
                 logger.warning("AI will operate without resume context")
                 return
-            
+
             # Parse PDF
             try:
                 from pypdf import PdfReader
-                
+
                 reader = PdfReader(pdf_file)
                 text_parts = []
-                
                 for page in reader.pages:
                     text_parts.append(page.extract_text())
-                
-                self.resume_text = "\n".join(text_parts)
+
+                self.resume_text = "\n".join([t for t in text_parts if t])
                 logger.info(f"✅ Loaded resume from: {pdf_file}")
                 logger.info(f"Resume text length: {len(self.resume_text)} characters")
-                
+
             except ImportError:
                 logger.error("pypdf library not installed! Run: pip install pypdf")
             except Exception as e:
                 logger.error(f"Failed to parse resume PDF: {e}")
-                
+
         except Exception as e:
             logger.error(f"Error loading resume: {e}")
+
+    def _flatten_resume_json(self, data: Any) -> Optional[str]:
+        """
+        Convert a structured resume JSON into a plain text block for LLM context.
+
+        Supports:
+        - { "resume_text": "..." }
+        - { "cv": { "sections": { "experience": [...], "skills": [...], ... } } }
+        """
+        try:
+            if not isinstance(data, dict):
+                return None
+
+            if isinstance(data.get("resume_text"), str) and data["resume_text"].strip():
+                return data["resume_text"].strip()
+
+            cv = data.get("cv", data)
+            if not isinstance(cv, dict):
+                return None
+
+            sections = cv.get("sections", {}) or {}
+            if not isinstance(sections, dict):
+                sections = {}
+
+            parts: List[str] = []
+
+            # Header info (best effort)
+            name = cv.get("name")
+            location = cv.get("location")
+            email = cv.get("email")
+            phone = cv.get("phone")
+            if isinstance(name, str) and name.strip():
+                parts.append(f"Name: {name.strip()}")
+            if isinstance(location, str) and location.strip():
+                parts.append(f"Location: {location.strip()}")
+            if isinstance(email, str) and email.strip():
+                parts.append(f"Email: {email.strip()}")
+            if isinstance(phone, str) and phone.strip():
+                parts.append(f"Phone: {phone.strip()}")
+
+            # Experience
+            exp = sections.get("experience", []) or []
+            if isinstance(exp, list):
+                for item in exp:
+                    if not isinstance(item, dict):
+                        continue
+                    company = item.get("company")
+                    position = item.get("position")
+                    date = item.get("date") or {}
+                    if not isinstance(date, dict):
+                        date = {}
+                    start = date.get("start_date")
+                    end = date.get("end_date")
+                    item_loc = item.get("location")
+                    summary = item.get("summary")
+                    highlights = item.get("highlights") or []
+
+                    header_bits = []
+                    if position and isinstance(position, str):
+                        header_bits.append(position.strip())
+                    if company and isinstance(company, str):
+                        header_bits.append(f"@ {company.strip()}")
+                    if start or end:
+                        header_bits.append(f"({start or ''} - {end or 'Present'})".strip())
+                    if item_loc and isinstance(item_loc, str):
+                        header_bits.append(f"[{item_loc.strip()}]")
+                    if header_bits:
+                        parts.append("Experience: " + " ".join([b for b in header_bits if b]))
+
+                    if summary and isinstance(summary, str) and summary.strip():
+                        parts.append("Summary: " + summary.strip())
+
+                    if isinstance(highlights, list) and highlights:
+                        parts.append("Highlights:")
+                        for h in highlights:
+                            if isinstance(h, str) and h.strip():
+                                parts.append("- " + h.strip())
+
+                    parts.append("")  # spacer
+
+            # Skills
+            skills = sections.get("skills", []) or []
+            if isinstance(skills, list) and skills:
+                parts.append("Skills:")
+                for s in skills:
+                    if not isinstance(s, dict):
+                        continue
+                    label = s.get("label")
+                    details = s.get("details")
+                    if isinstance(label, str) and label.strip() and isinstance(details, str):
+                        parts.append(f"- {label.strip()}: {details.strip()}")
+                    elif isinstance(label, str) and label.strip():
+                        parts.append(f"- {label.strip()}")
+                    elif isinstance(details, str) and details.strip():
+                        parts.append(f"- {details.strip()}")
+                parts.append("")
+
+            # Education (best effort)
+            edu = sections.get("education", []) or []
+            if isinstance(edu, list) and edu:
+                parts.append("Education:")
+                for e in edu:
+                    if not isinstance(e, dict):
+                        continue
+                    inst = e.get("institution")
+                    degree = e.get("degree")
+                    area = e.get("area")
+                    date = e.get("date") or {}
+                    if not isinstance(date, dict):
+                        date = {}
+                    start = date.get("start_date")
+                    end = date.get("end_date")
+                    loc = e.get("location")
+
+                    line_bits = []
+                    if degree and isinstance(degree, str):
+                        line_bits.append(degree.strip())
+                    if area and isinstance(area, str):
+                        line_bits.append(area.strip())
+                    if inst and isinstance(inst, str):
+                        line_bits.append(f"@ {inst.strip()}")
+                    if start or end:
+                        line_bits.append(f"({start or ''} - {end or ''})".strip())
+                    if loc and isinstance(loc, str):
+                        line_bits.append(f"[{loc.strip()}]")
+                    if line_bits:
+                        parts.append("- " + " ".join([b for b in line_bits if b]))
+
+                parts.append("")
+
+            text = "\n".join(parts).strip()
+            if text and len(text) > 50:
+                return text
+            return None
+
+        except Exception:
+            return None
 
     def get_smart_answer(
         self,
@@ -160,7 +373,7 @@ class AIQuestionAnswerer:
         question_lower = question_text.lower()
         options = options or []
 
-        if self.client:
+        if self.llm_enabled:
             try:
                 answer = self._get_ai_answer(
                     question_text, context, input_type=input_type, options=options
@@ -192,7 +405,7 @@ class AIQuestionAnswerer:
         For checkbox/toggle: instructs LLM to return yes/no or true/false.
         For text: concise generation. Validates answer against options when provided.
         """
-        if not self.client:
+        if not self.llm_enabled:
             return None
 
         input_type = (input_type or "text").lower()
@@ -236,21 +449,35 @@ Question: {question}
 
 Answer (or exactly "REQUIRES_HUMAN_INPUT" if uncertain):"""
 
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a precise job application assistant. Return only the answer string or REQUIRES_HUMAN_INPUT.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=100,
-                temperature=0.2,
-            )
+            system_msg = "You are a precise job application assistant. Return only the answer string or REQUIRES_HUMAN_INPUT."
 
-            raw = (response.choices[0].message.content or "").strip()
-            answer = " ".join(raw.split()).strip().rstrip(".").strip()
+            if self.provider == "openai":
+                response = self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=100,
+                    temperature=0.2,
+                )
+                raw = (response.choices[0].message.content or "").strip()
+            elif self.provider == "ollama":
+                if not self.ollama_client:
+                    return None
+                raw = self.ollama_client.chat(
+                    messages=[
+                        OllamaChatMessage(role="system", content=system_msg),
+                        OllamaChatMessage(role="user", content=prompt),
+                    ],
+                    model=self.ollama_model,
+                    temperature=0.2,
+                    max_tokens=100,
+                )
+            else:
+                return None
+
+            answer = " ".join((raw or "").split()).strip().rstrip(".").strip()
             if answer.upper() == "REQUIRES_HUMAN_INPUT" or not answer:
                 return None
 
@@ -267,31 +494,10 @@ Answer (or exactly "REQUIRES_HUMAN_INPUT" if uncertain):"""
                     return "no"
                 return None
 
-            # For select/radio: validate; allow exact, case-insensitive, fuzzy 80%, or partial match
-            if options and input_type in ("select", "radio"):
-                if answer in options:
-                    return answer
-                for opt in options:
-                    if (opt or "").strip().lower() == (answer or "").strip().lower():
-                        return opt
-                for opt in options:
-                    if answer.strip().lower() in (opt or "").strip().lower():
-                        return opt
-                    if (opt or "").strip().lower() in answer.strip().lower():
-                        return opt
-                try:
-                    from thefuzz import fuzz, process
-                    best = process.extractOne(answer, options, scorer=fuzz.ratio)
-                    if best and len(best) >= 2 and best[1] >= 80:
-                        return best[0]
-                except Exception:
-                    pass
-                return None
-
             return answer
 
         except Exception as e:
-            logger.debug(f"OpenAI API error: {e}")
+            logger.debug(f"LLM API error ({self.provider}): {e}", exc_info=True)
             return None
 
     def _get_fallback_answer(
@@ -366,14 +572,14 @@ class JobApplication:
         self.wait = WebDriverWait(driver, 30)
 
         # Initialize AI answerer
-        self.ai_answerer = AIQuestionAnswerer(config.openai_api_key)
+        self.ai_answerer = AIQuestionAnswerer(config=config)
         
         # Setup output file
         self.output_file = Path(config.output_filename)
         self._ensure_output_file()
         
         # Setup Q&A Memory Manager (Self-Learning System)
-        self.qa_manager = QAMemoryManager("qa_memory.csv")
+        self.qa_manager = QAMemoryManager("qa_memory.csv", config=config)
         
         # Automatically deduplicate CSV on startup to clean any existing duplicates
         self.qa_manager.deduplicate_memory()
@@ -769,6 +975,10 @@ class JobApplication:
             }
 
             logger.debug(f"Found {len(form_groups)} form field groups to process")
+            if len(form_groups) == 0:
+                logger.debug(
+                    "No form field groups detected on this step (LinkedIn DOM may have changed)."
+                )
 
             for group in form_groups:
                 if not group.is_displayed():
@@ -797,7 +1007,7 @@ class JobApplication:
                     )
                 else:
                     logger.warning(f"❌ Not in memory: '{question_text[:60]}...'")
-                    if self.ai_answerer.client:
+                    if self.ai_answerer.llm_enabled:
                         logger.info("🤖 Trying AI-powered answer...")
                         answer = self.ai_answerer.get_smart_answer(
                             question_text,
@@ -864,40 +1074,87 @@ class JobApplication:
             pass
         return None
 
+    def _extract_question_fallback_key(self, group_element) -> Optional[str]:
+        """
+        Stable key from DOM when visible label text is missing or unusable.
+        Uses name, id, or first data-test-* attribute on a visible control.
+        """
+        try:
+            inputs = group_element.find_elements(By.CSS_SELECTOR, "input, select, textarea")
+            for el in inputs:
+                if not el.is_displayed():
+                    continue
+                name = (el.get_attribute("name") or "").strip()
+                if name:
+                    return f"linkedin_field:{name}"
+                eid = (el.get_attribute("id") or "").strip()
+                if eid:
+                    return f"linkedin_field:{eid}"
+                dt = self.driver.execute_script(
+                    """
+                    var e = arguments[0];
+                    for (var i = 0; i < e.attributes.length; i++) {
+                        var n = e.attributes[i].name;
+                        if (n.indexOf('data-test') === 0) {
+                            var v = (e.attributes[i].value || '').trim();
+                            if (v) return n + ':' + v;
+                        }
+                    }
+                    return null;
+                    """,
+                    el,
+                )
+                if dt:
+                    return f"linkedin_field:{dt}"
+        except Exception:
+            pass
+        return None
+
     def _extract_question_text(self, group_element) -> Optional[str]:
         """
         ROBUST extraction of question text from a form group element.
-        
-        Implements multiple strategies with CRITICAL filtering to avoid noise.
-        Priority: Aria-label → Legend → Header Classes → Label → Text fallback
-        
+
+        Strategies A–D allow LinkedIn placeholder-only labels (e.g. "Please make a selection").
+        Strategy E keeps stricter noise filtering on aggregated group text.
+        Last resort: stable key from _extract_question_fallback_key.
+
         Args:
             group_element: The form group WebElement
 
         Returns:
-            Cleaned question text or None if extraction fails
+            Cleaned question text, fallback key, or None if nothing usable
         """
-        # NOISE FILTER: Common invalid texts to reject
-        NOISE_TEXTS = [
+        # Strict: used for Strategy E (full text often mixes garbage + first token noise)
+        NOISE_TEXTS_STRICT = [
             "please make a selection",
             "enter a whole number",
             "select an option",
             "required",
             "choose an option",
             "pick one",
-            ""
+            "",
         ]
-        
-        def is_valid_question(text: str) -> bool:
-            """Check if extracted text is a valid question (not noise)."""
+
+        def is_valid_question_strict(text: str) -> bool:
             if not text or len(text) < 3:
                 return False
             text_lower = text.lower().strip()
-            for noise in NOISE_TEXTS:
+            for noise in NOISE_TEXTS_STRICT:
+                if not noise:
+                    continue
                 if text_lower == noise or text_lower.startswith(noise):
                     return False
             return True
-        
+
+        def is_valid_question_relaxed(text: str) -> bool:
+            """Labels from aria/legend/header/label: reject only empty or trivial tokens."""
+            if not text or len(text.strip()) < 2:
+                return False
+            t = text.strip().lower()
+            if t in ("", "*"):
+                return False
+            return True
+
         try:
             # STRATEGY A: Aria-Label (HIGHEST PRIORITY - most reliable)
             try:
@@ -908,7 +1165,7 @@ class JobApplication:
                 for input_elem in inputs:
                     if not input_elem.is_displayed():
                         continue
-                    
+
                     # Try aria-label
                     aria_label = input_elem.get_attribute("aria-label")
                     if aria_label:
@@ -916,11 +1173,11 @@ class JobApplication:
                         cleaned = aria_label.replace('\n', ' ').replace('\r', ' ')
                         cleaned = ' '.join(cleaned.split())  # Collapse multiple spaces
                         cleaned = self._clean_question_text(cleaned)
-                        
-                        if cleaned and is_valid_question(cleaned):
+
+                        if cleaned and is_valid_question_relaxed(cleaned):
                             logger.debug(f"[Strategy A: Aria] '{cleaned[:50]}...'")
                             return cleaned
-                    
+
                     # Try aria-labelledby
                     aria_labelledby = input_elem.get_attribute("aria-labelledby")
                     if aria_labelledby:
@@ -931,13 +1188,13 @@ class JobApplication:
                                 cleaned = text.replace('\n', ' ').replace('\r', ' ')
                                 cleaned = ' '.join(cleaned.split())
                                 cleaned = self._clean_question_text(cleaned)
-                                
-                                if cleaned and is_valid_question(cleaned):
+
+                                if cleaned and is_valid_question_relaxed(cleaned):
                                     logger.debug(f"[Strategy A: Aria-labelledby] '{cleaned[:50]}...'")
                                     return cleaned
-                        except:
+                        except Exception:
                             pass
-            except:
+            except Exception:
                 pass
 
             # STRATEGY B: Legend (for fieldsets - common in Yes/No radios)
@@ -948,11 +1205,11 @@ class JobApplication:
                     cleaned = text.replace('\n', ' ').replace('\r', ' ')
                     cleaned = ' '.join(cleaned.split())
                     cleaned = self._clean_question_text(cleaned)
-                    
-                    if cleaned and is_valid_question(cleaned):
+
+                    if cleaned and is_valid_question_relaxed(cleaned):
                         logger.debug(f"[Strategy B: Legend] '{cleaned[:50]}...'")
                         return cleaned
-            except:
+            except Exception:
                 pass
 
             # STRATEGY C: LinkedIn-specific header classes
@@ -964,7 +1221,7 @@ class JobApplication:
                 ".artdeco-text-input--label",
                 ".jobs-easy-apply-form-section__title"
             ]
-            
+
             for selector in header_selectors:
                 try:
                     header_elem = group_element.find_element(By.CSS_SELECTOR, selector)
@@ -973,11 +1230,11 @@ class JobApplication:
                         cleaned = text.replace('\n', ' ').replace('\r', ' ')
                         cleaned = ' '.join(cleaned.split())
                         cleaned = self._clean_question_text(cleaned)
-                        
-                        if cleaned and is_valid_question(cleaned):
+
+                        if cleaned and is_valid_question_relaxed(cleaned):
                             logger.debug(f"[Strategy C: Header '{selector}'] '{cleaned[:50]}...'")
                             return cleaned
-                except:
+                except Exception:
                     continue
 
             # STRATEGY D: Standard Label Tag
@@ -988,35 +1245,39 @@ class JobApplication:
                     cleaned = text.replace('\n', ' ').replace('\r', ' ')
                     cleaned = ' '.join(cleaned.split())
                     cleaned = self._clean_question_text(cleaned)
-                    
-                    if cleaned and is_valid_question(cleaned):
+
+                    if cleaned and is_valid_question_relaxed(cleaned):
                         logger.debug(f"[Strategy D: Label] '{cleaned[:50]}...'")
                         return cleaned
-            except:
+            except Exception:
                 pass
 
-            # STRATEGY E: Text Node Fallback (last resort)
+            # STRATEGY E: Text Node Fallback (last resort before DOM key)
             try:
                 full_text = group_element.text
                 if full_text:
                     # Clean immediately
                     full_text = full_text.replace('\n', ' ').replace('\r', ' ')
                     full_text = ' '.join(full_text.split())
-                    
+
                     # Split and find first valid line
                     parts = [p.strip() for p in full_text.split('.') if p.strip()]
                     if not parts:
                         parts = [full_text]
-                    
+
                     for part in parts[:3]:  # Check first 3 parts
                         cleaned = self._clean_question_text(part)
-                        if cleaned and is_valid_question(cleaned) and len(cleaned) < 200:
+                        if cleaned and is_valid_question_strict(cleaned) and len(cleaned) < 200:
                             logger.debug(f"[Strategy E: Text] '{cleaned[:50]}...'")
                             return cleaned
-            except:
+            except Exception:
                 pass
 
-            # All strategies failed
+            fb = self._extract_question_fallback_key(group_element)
+            if fb:
+                logger.debug(f"[Fallback key] '{fb[:80]}'")
+                return fb
+
             logger.warning("⚠️  Could not extract valid question text")
             return None
 
@@ -1067,9 +1328,11 @@ class JobApplication:
             Dict with keys: question_text, input_type, options.
             input_type is one of: "text", "select", "radio", "checkbox", "toggle".
             options: for select/radio, list of option strings; for checkbox/toggle, ["Yes", "No"]; for text, [].
-            None if question text cannot be extracted.
+            None if the group has no extractable inputs and no question key.
         """
         question_text = self._extract_question_text(group_element)
+        if not question_text:
+            question_text = self._extract_question_fallback_key(group_element)
         if not question_text:
             return None
 
@@ -1481,6 +1744,49 @@ class JobApplication:
                 except Exception as e:
                     logger.debug(f"Error processing red text element: {e}")
                     continue
+
+            # Method 3: ARIA alerts / generic error containers
+            alert_elements = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "[role='alert'], [data-test-form-element-error], [data-test-inline-error], .artdeco-alert--error",
+            )
+
+            for elem in alert_elements:
+                try:
+                    if not elem.is_displayed():
+                        continue
+
+                    message = (elem.text or "").strip()
+                    if not message:
+                        continue
+
+                    if elem in [e["element"] for e in validation_errors]:
+                        continue
+
+                    field_label = "Unknown field"
+                    parent_selectors = [
+                        "./ancestor::*[contains(@class, 'jobs-easy-apply-form-section__grouping')]",
+                        "./ancestor::*[contains(@class, 'fb-dash-form-element')]",
+                        "./ancestor::*[contains(@class, 'form-section')]",
+                    ]
+
+                    for selector in parent_selectors:
+                        try:
+                            parent = elem.find_element(By.XPATH, selector)
+                            extracted = self._extract_question_text(parent)
+                            if extracted:
+                                field_label = extracted
+                                break
+                        except Exception:
+                            continue
+
+                    validation_errors.append(
+                        {"element": elem, "message": message, "field_label": field_label}
+                    )
+                    logger.warning(f"Validation error: '{field_label}' - '{message}'")
+                except Exception as e:
+                    logger.debug(f"Error processing alert element: {e}")
+                    continue
         
         except Exception as e:
             logger.error(f"Error in _detect_validation_errors: {e}", exc_info=True)
@@ -1539,6 +1845,7 @@ class JobApplication:
         validation_errors = self._detect_validation_errors()
         
         if not validation_errors:
+            logger.debug("No validation errors detected on this step.")
             return True  # No errors, proceed
         
         # STEP A: RED FLAGS DETECTED
@@ -1611,20 +1918,26 @@ class JobApplication:
                     continue
                 
                 try:
-                    # Extract question/label
-                    question = self._extract_question_from_section(section)
-                    if not question:
-                        continue
-                    
-                    # Extract answer/value
                     answer = self._extract_answer_from_section(section)
                     if not answer:
                         continue
-                    
+
+                    question = self._extract_question_from_section(section)
+                    if not question:
+                        question = self._extract_question_fallback_key(section)
+                        if question:
+                            logger.info(
+                                f"📝 Bulk scrape: using fallback question key (no visible label): {question[:120]}"
+                            )
+
+                    if not question:
+                        continue
+
                     # Save to memory
                     self.qa_manager.learn_answer(question, answer)
-                    logger.info(f"📝 Learned: '{question[:50]}...' = '{answer[:50]}...'")
-                    print(f"✅ Saved: '{question[:50]}...' -> '{answer[:30]}...'")
+                    q_preview = question[:50] + ("..." if len(question) > 50 else "")
+                    logger.info(f"📝 Learned: '{q_preview}' = '{answer[:50]}...'")
+                    print(f"✅ Saved: '{q_preview}' -> '{answer[:30]}...'")
                     learned_count += 1
                     
                 except Exception as e:

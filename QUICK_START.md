@@ -32,6 +32,14 @@ python3 -m src.main
 ```env
 LINKEDIN_USERNAME=your.email@example.com
 LINKEDIN_PASSWORD=your_password
+
+# LLM provider (recommended: ollama)
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+# Optional: pin a model name (leave empty for auto-select)
+OLLAMA_MODEL=
+
+# Optional (only needed when AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-optional-api-key
 ```
 
@@ -74,7 +82,8 @@ After dry run, check:
 tail -20 logs/bot_debug.log
 
 # Should see:
-# ✅ OpenAI client initialized
+# ✅ AI Question Answering: ACTIVE
+# ✅ Ollama model ready: <model>
 # ✅ Constant filters applied
 # ✅ Found X jobs to process
 ```
@@ -134,6 +143,7 @@ cat logs/bot_debug.log
 2. **Build memory** - Answer more questions to train bot
 3. **Optimize config** - Refine positions/locations
 4. **Enable AI** - Set OpenAI API key for full automation
+4. **Enable AI** - Run Ollama locally and set `AI_PROVIDER=ollama` (or set `AI_PROVIDER=openai` + `OPENAI_API_KEY`)
 
 ---
 

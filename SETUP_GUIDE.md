@@ -8,11 +8,11 @@
 
 Before you start, make sure you have:
 
-- [ ] Python 3.8 or higher installed
-- [ ] Google Chrome browser installed
-- [ ] LinkedIn account credentials
-- [ ] Resume PDF ready
-- [ ] (Optional) OpenAI API key for AI-powered answers
+- Python 3.8 or higher installed
+- Google Chrome browser installed
+- LinkedIn account credentials
+- Resume PDF ready
+- (Optional) OpenAI API key for AI-powered answers
 
 ---
 
@@ -38,9 +38,10 @@ python3 --version
 ```
 
 **If Python is not installed:**
+
 - **macOS**: `brew install python3`
 - **Ubuntu/Debian**: `sudo apt install python3 python3-pip`
-- **Windows**: Download from https://www.python.org/downloads/
+- **Windows**: Download from [https://www.python.org/downloads/](https://www.python.org/downloads/)
 
 ### Step 3: Create Virtual Environment
 
@@ -59,6 +60,7 @@ venv\Scripts\activate
 ```
 
 **Troubleshooting:**
+
 - If `python3` command not found, try just `python`
 - If `venv` module not found, install with: `pip3 install virtualenv`
 
@@ -73,6 +75,7 @@ pip install -r requirements.txt
 ```
 
 **Expected output:**
+
 ```
 Successfully installed selenium-4.x.x undetected-chromedriver-3.x.x ...
 ```
@@ -102,6 +105,7 @@ OPENAI_API_KEY=sk-your-api-key-here
 ```
 
 **Important Notes:**
+
 - Replace with your ACTUAL LinkedIn email and password
 - Do NOT use quotes around values
 - Keep this file SECRET - never share or commit to Git
@@ -159,6 +163,7 @@ output_filename:
 ```
 
 **Critical Points:**
+
 1. Use YOUR real phone number
 2. Choose positions you're ACTUALLY qualified for
 3. Set FULL PATH to your resume PDF
@@ -179,17 +184,20 @@ ls assets/
 ```
 
 **For macOS users:**
+
 ```bash
 # Give execute permission
 chmod +x assets/chromedriver_darwin
 ```
 
 **For Linux users:**
+
 ```bash
 chmod +x assets/chromedriver_linux
 ```
 
 **For Windows users:**
+
 - No special permissions needed
 - Windows Defender might flag it - allow it
 
@@ -203,6 +211,7 @@ python3 -m src.main --dry-run
 ```
 
 **What to expect:**
+
 1. Chrome browser opens automatically
 2. Bot logs into LinkedIn
 3. Bot navigates to job search
@@ -212,6 +221,7 @@ python3 -m src.main --dry-run
 7. **Bot DOES NOT submit applications** (dry run mode)
 
 **Watch the terminal for:**
+
 ```
 [INFO] Credentials loaded for user: yo***
 [INFO] ✅ OpenAI client initialized
@@ -221,6 +231,7 @@ python3 -m src.main --dry-run
 ```
 
 **If you see errors:**
+
 - Check `.env` file has correct credentials
 - Verify `config.yaml` has valid paths
 - Ensure Chrome browser is installed
@@ -240,11 +251,13 @@ Question: "How many years of experience do you have with Python?"
 ```
 
 **Type your answer:**
+
 ```
 👉 Enter answer for this question (or type 'SKIP' to ignore): 5
 ```
 
 **Bot will save it:**
+
 ```
 ✅ Learned: 'How many years...' -> '5'
 ```
@@ -263,6 +276,7 @@ python3 -m src.main
 ```
 
 **Monitoring:**
+
 - Keep terminal visible
 - Bot will pause if it encounters unknown questions
 - Bot will pause if validation errors occur
@@ -305,6 +319,7 @@ tail -f logs/bot_debug.log
 ```
 
 **Look for these SUCCESS indicators:**
+
 ```
 ✅ OpenAI client initialized
 ✅ Constant filters applied successfully!
@@ -320,6 +335,7 @@ cat data/qa_memory.csv
 ```
 
 **Should look like:**
+
 ```csv
 question_text,answer_text
 "How many years of experience do you have with Python?","5"
@@ -335,6 +351,7 @@ cat output/applications.csv
 ```
 
 **Should show:**
+
 ```csv
 job_id,job_title,company,status,timestamp
 3791234567,"AI Engineer","TechCorp","applied","2026-01-23 10:15:30"
@@ -349,6 +366,7 @@ job_id,job_title,company,status,timestamp
 **Cause**: Dependencies not installed
 
 **Fix**:
+
 ```bash
 # Ensure venv is activated
 source venv/bin/activate  # macOS/Linux
@@ -364,6 +382,7 @@ pip install -r requirements.txt
 **Cause**: `.env` file missing or incorrect
 
 **Fix**:
+
 1. Verify `.env` file exists in project root
 2. Check it has correct format (no quotes, no spaces around `=`)
 3. Verify credentials are correct
@@ -373,6 +392,7 @@ pip install -r requirements.txt
 **Cause**: ChromeDriver permissions or path issue
 
 **Fix**:
+
 ```bash
 # macOS/Linux
 chmod +x assets/chromedriver_darwin  # or chromedriver_linux
@@ -386,6 +406,7 @@ ls -la assets/chromedriver*
 **Cause**: LinkedIn page structure changed OR filters not configured
 
 **Fix**:
+
 1. Check `config.yaml` has `experience_level` and `workplace_type`
 2. Run in dry-run mode and watch terminal
 3. Look for "Applying CONSTANT filters" message
@@ -396,6 +417,7 @@ ls -la assets/chromedriver*
 **Cause**: OpenAI package not in requirements.txt or failed to install
 
 **Fix**:
+
 ```bash
 pip install openai
 ```
@@ -405,6 +427,7 @@ pip install openai
 **Cause**: Q&A memory not saving correctly
 
 **Fix**:
+
 1. Check `data/` folder exists
 2. Check `qa_memory.csv` exists in `data/` folder
 3. Verify write permissions: `ls -la data/`
@@ -430,12 +453,12 @@ pip install openai
 2. **Apply Date Filter**: Only variable filter
 3. **Load Jobs**: Get list of jobs
 4. **For Each Job**:
-   - Click job card
-   - Check for "Easy Apply" button
-   - Click "Easy Apply"
-   - Fill form (using memory, AI, or user input)
-   - Check for validation errors
-   - Submit if no errors
+  - Click job card
+  - Check for "Easy Apply" button
+  - Click "Easy Apply"
+  - Fill form (using memory, AI, or user input)
+  - Check for validation errors
+  - Submit if no errors
 
 ### When Bot Pauses
 
@@ -446,6 +469,7 @@ pip install openai
 3. **Manual Confirmation**: If `require_submission_confirmation: true`
 
 **What to do:**
+
 - Read the terminal message carefully
 - Take action in browser if needed
 - Press ENTER to continue
@@ -456,11 +480,11 @@ pip install openai
 
 Before running:
 
-- [ ] `.env` file is in `.gitignore`
-- [ ] Never shared `.env` file with anyone
-- [ ] Using strong LinkedIn password
-- [ ] OpenAI API key (if used) is from official account
-- [ ] Resume PDF doesn't contain sensitive personal data
+- `.env` file is in `.gitignore`
+- Never shared `.env` file with anyone
+- Using strong LinkedIn password
+- OpenAI API key (if used) is from official account
+- Resume PDF doesn't contain sensitive personal data
 
 ---
 

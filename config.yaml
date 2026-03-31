@@ -89,6 +89,19 @@ blackListTitles: []
   # - Marketing
 
 # ============================================================================
+# Q&A memory lookup (optional; env QA_MEMORY_* overrides these)
+# ============================================================================
+qa_memory:
+  fuzzy_threshold_high: 88      # auto-accept fuzzy token_set_ratio score
+  fuzzy_threshold_low: 62     # min score to keep candidate for embed/LLM tiers
+  fuzzy_candidate_limit: 40
+  intent_llm_enabled: true    # Ollama picks best match among fuzzy candidates
+  intent_top_k: 25
+  embedding_enabled: false      # set true if you pull nomic-embed-text (or similar)
+  embedding_model: nomic-embed-text
+  embedding_threshold: 0.82
+
+# ============================================================================
 # Advanced Settings
 # ============================================================================
 # Require manual confirmation before submitting each application

@@ -3,6 +3,10 @@ Main Bot class for LinkedIn automation with stealth features.
 """
 
 import os
+import re
+import platform
+import shutil
+import subprocess
 import time
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -16,6 +20,65 @@ from src.logger import get_logger
 from src.utils import StealthUtils
 
 logger = get_logger()
+
+
+def detect_chrome_major_version(chrome_binary: Optional[str] = None) -> Optional[int]:
+    """
+    Detect installed Google Chrome major version (e.g. 146) so ChromeDriver matches
+    the browser after auto-updates — no manual version_main edits needed.
+
+    Args:
+        chrome_binary: Path to Chrome executable if already known (e.g. from options.binary_location)
+
+    Returns:
+        Major version number, or None if detection failed.
+    """
+    candidates: list[str] = []
+    if chrome_binary and os.path.isfile(chrome_binary):
+        candidates.append(chrome_binary)
+
+    system = platform.system()
+    if system == "Darwin":
+        mac_chrome = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
+        if mac_chrome not in candidates and os.path.isfile(mac_chrome):
+            candidates.append(mac_chrome)
+    elif system == "Windows":
+        for p in (
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ):
+            if os.path.isfile(p) and p not in candidates:
+                candidates.append(p)
+    else:
+        for name in (
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ):
+            path = shutil.which(name)
+            if path and path not in candidates:
+                candidates.append(path)
+                break
+
+    for exe in candidates:
+        try:
+            result = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            text = (result.stdout or "") + (result.stderr or "")
+            m = re.search(r"(?:Chrome|Chromium)\s+(\d+)\.", text)
+            if m:
+                return int(m.group(1))
+        except Exception as e:
+            logger.debug(f"Chrome version probe failed for {exe}: {e}")
+            continue
+    return None
 
 
 class LinkedInBot:
@@ -83,15 +146,25 @@ class LinkedInBot:
                 options.binary_location = chrome_path
                 logger.info(f"Using Chrome from: {chrome_path}")
 
-            # Initialize undetected ChromeDriver
-            # version_main=144 to match Chrome 144.0.7559.110
-            # use_subprocess=True helps with stability on newer Chrome versions
-            self.driver = uc.Chrome(
-                options=options, 
-                version_main=144,
-                use_subprocess=True,
-                driver_executable_path=None
-            )
+            # Match ChromeDriver to installed Chrome (auto-updates change browser version)
+            chrome_major = detect_chrome_major_version(chrome_path)
+            uc_kwargs = {
+                "options": options,
+                "use_subprocess": True,
+                "driver_executable_path": None,
+            }
+            if chrome_major is not None:
+                uc_kwargs["version_main"] = chrome_major
+                logger.info(
+                    f"Chrome major version {chrome_major} detected — using matching ChromeDriver"
+                )
+            else:
+                logger.warning(
+                    "Could not detect Chrome version; undetected-chromedriver will use its default "
+                    "(if startup fails after a Chrome update, reinstall undetected-chromedriver)"
+                )
+
+            self.driver = uc.Chrome(**uc_kwargs)
             self.wait = WebDriverWait(self.driver, 30)
             
             # Give browser extra time to fully initialize with Chrome 144+

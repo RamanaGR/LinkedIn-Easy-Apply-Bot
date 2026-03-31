@@ -13,10 +13,10 @@
 
 ### 🤖 Intelligent Form Filling
 - **Self-Learning Q&A System**: Remembers your answers in `qa_memory.csv`
-- **AI-Powered Answers**: Optional OpenAI integration for automatic question answering
+- **AI-Powered Answers**: Local (Ollama) or optional OpenAI integration for automatic question answering
 - **Priority System**:
   1. Check memory for known answers
-  2. Try AI-powered answer (if API key provided)
+  2. Try AI-powered answer (if an LLM provider is enabled)
   3. Ask user and learn for future applications
 
 ### 🛡️ Error-Aware Processing
@@ -39,7 +39,7 @@
 - **Python 3.8+**
 - **Google Chrome** browser
 - **LinkedIn** account
-- **OpenAI API Key** (optional, for AI-powered answers)
+- **LLM provider** (optional): Ollama (local) or OpenAI (cloud)
 
 ### Step 1: Clone Repository
 
@@ -75,7 +75,13 @@ Create a `.env` file in the project root:
 LINKEDIN_USERNAME=your.email@example.com
 LINKEDIN_PASSWORD=your_password
 
-# Optional: OpenAI API Key (for AI-powered answers)
+# LLM provider (recommended: ollama)
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+# Optional: pin a model name (leave empty for auto-select)
+OLLAMA_MODEL=
+
+# Optional (only when AI_PROVIDER=openai):
 OPENAI_API_KEY=sk-your-api-key-here
 ```
 
@@ -200,6 +206,7 @@ Question: "How many years of experience do you have with Python?"
 If a question is **not** in memory:
 
 1. **Try AI First** (if `OPENAI_API_KEY` is set):
+1. **Try AI First** (if an LLM provider is enabled):
    ```
    🤖 Trying AI-powered answer...
    ✅ [AI] Generated answer: 'Yes'
@@ -402,7 +409,7 @@ Applications: 12 applied, 3 failed, 5 skipped
 
 ### Optimizing Performance
 
-1. **Enable AI Answers**: Set `OPENAI_API_KEY` for faster automation
+1. **Enable AI Answers**: Set `AI_PROVIDER=ollama` (and run Ollama) or set `AI_PROVIDER=openai` + `OPENAI_API_KEY`
 
 2. **Refine Positions List**: Focus on specific roles to reduce noise
 
@@ -420,7 +427,7 @@ Applications: 12 applied, 3 failed, 5 skipped
 - ✅ Saves your answers in `qa_memory.csv` (local only)
 - ✅ Logs activity to `bot_debug.log` (local only)
 - ✅ Never shares data with third parties
-- ✅ Uses OpenAI API only if you provide key (optional)
+- ✅ Uses Ollama or OpenAI depending on `AI_PROVIDER` (optional)
 
 ### What You Should Do
 
