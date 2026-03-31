@@ -250,6 +250,9 @@ LinkedIn-Easy-Apply-Bot/
 ├── config.yaml             # Job search configuration
 ├── requirements.txt        # Python dependencies
 ├── README.md              # This file
+├── QUICK_START.md         # Short setup & run guide
+├── SETUP_GUIDE.md         # Detailed setup
+├── _trash/                # Archived docs & dev scripts (optional; see _trash/README.md)
 │
 ├── src/
 │   ├── main.py            # Main entry point

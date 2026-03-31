@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Quick test: load config, create AI answerer, call get_smart_answer.
-Run from project root: python test_ai_answer.py
+Run from project root: python _trash/dev_scripts/test_ai_answer.py
 Verifies OPENAI_API_KEY is loaded and AI form-filling path works.
 """
 import sys
