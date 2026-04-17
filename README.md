@@ -205,7 +205,6 @@ Question: "How many years of experience do you have with Python?"
 
 If a question is **not** in memory:
 
-1. **Try AI First** (if `OPENAI_API_KEY` is set):
 1. **Try AI First** (if an LLM provider is enabled):
    ```
    🤖 Trying AI-powered answer...
@@ -213,7 +212,7 @@ If a question is **not** in memory:
    💾 Saved AI answer to memory
    ```
 
-2. **Ask User** (if AI didn't provide answer):
+2. **Ask User** (if AI didn't provide an answer):
    ```
    👤 Requesting user input...
    👉 Enter answer: ...
