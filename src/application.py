@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
@@ -983,6 +984,11 @@ class JobApplication:
             for group in form_groups:
                 if not group.is_displayed():
                     continue
+                try:
+                    StealthUtils.smooth_scroll_to_element(self.driver, group)
+                    StealthUtils.human_sleep(0.12, 0.28)
+                except Exception:
+                    pass
 
                 # STEP A: Analyze form element (question, input type, options)
                 analysis = self._analyze_form_element(group)
@@ -1034,7 +1040,11 @@ class JobApplication:
                 if answer:
                     logger.debug(f"Attempting to fill field with answer: '{answer}'")
                     self._fill_field_with_answer(
-                        group, answer, input_type=input_type, options=options
+                        group,
+                        answer,
+                        input_type=input_type,
+                        options=options,
+                        question_text=question_text,
                     )
                 else:
                     logger.warning(
@@ -1350,7 +1360,23 @@ class JobApplication:
                     input_type = "select"
                     return {"question_text": question_text, "input_type": input_type, "options": options}
 
-            # 2) Custom dropdown (LinkedIn often uses div + li)
+            # 2) Closed Artdeco / LinkedIn dropdown (options only exist after opening — do not misclassify as text)
+            closed_dd_triggers = group_element.find_elements(
+                By.CSS_SELECTOR,
+                "button.artdeco-dropdown__trigger, "
+                "button.artdeco-dropdown__button, "
+                ".jobs-easy-apply-form-element__dropdown-button button, "
+                "input[data-test-text-entity-list-input]",
+            )
+            if closed_dd_triggers and any(t.is_displayed() for t in closed_dd_triggers):
+                input_type = "select"
+                return {
+                    "question_text": question_text,
+                    "input_type": input_type,
+                    "options": [],
+                }
+
+            # 2b) Custom dropdown with listbox already open
             custom_dropdown = group_element.find_elements(
                 By.CSS_SELECTOR,
                 "[role='listbox'] li, .artdeco-dropdown__item, [data-test-dropdown-option]"
@@ -1418,12 +1444,230 @@ class JobApplication:
 
         return {"question_text": question_text, "input_type": input_type, "options": options}
 
+    def _is_location_city_field(self, group_element, question_text: Optional[str]) -> bool:
+        blob = ((question_text or "") + " " + (group_element.text or "")).lower()
+        if "location (city)" in blob:
+            return True
+        if "location" in blob and "city" in blob:
+            return True
+        return False
+
+    def _fill_location_typeahead(self, group_element, answer: str) -> bool:
+        """
+        LinkedIn location fields use a combobox/typeahead: typing alone fails validation
+        until a suggestion is selected from the dropdown (often portaled to body).
+        """
+        if not answer or not str(answer).strip():
+            return False
+
+        text_inputs = group_element.find_elements(
+            By.CSS_SELECTOR,
+            "input[type='text'], input:not([type]), input[role='combobox']",
+        )
+        target = None
+        for inp in text_inputs:
+            if not inp.is_displayed():
+                continue
+            al = (inp.get_attribute("aria-label") or "").lower()
+            role = (inp.get_attribute("role") or "").lower()
+            ac = (inp.get_attribute("aria-autocomplete") or "").lower()
+            if role == "combobox" or ac == "list" or "location" in al or "city" in al:
+                target = inp
+                break
+        if target is None:
+            for inp in text_inputs:
+                if inp.is_displayed():
+                    target = inp
+                    break
+        if not target:
+            return False
+
+        answer_stripped = answer.strip()
+        answer_l = answer_stripped.lower()
+
+        try:
+            StealthUtils.smooth_scroll_to_element(self.driver, target)
+            StealthUtils.human_sleep(0.25, 0.5)
+            target.click()
+            try:
+                target.clear()
+            except Exception:
+                pass
+            try:
+                if sys.platform == "darwin":
+                    target.send_keys(Keys.COMMAND + "a")
+                else:
+                    target.send_keys(Keys.CONTROL + "a")
+                target.send_keys(Keys.BACKSPACE)
+            except Exception:
+                pass
+            StealthUtils.type_like_human(target, answer_stripped)
+        except Exception as e:
+            logger.debug(f"Location typeahead type failed: {e}")
+            return False
+
+        # Suggestions may render outside the form group (portal)
+        option_selectors = [
+            "[role='listbox'] [role='option']",
+            "[role='listbox'] li",
+            "div.basic-typeahead__selectable",
+            "li.basic-typeahead__selectable",
+            ".jobs-search-typeahead__hit",
+            "[data-test-typeahead-result]",
+        ]
+
+        deadline = time.time() + 8.0
+        best_click = None
+        while time.time() < deadline:
+            for sel in option_selectors:
+                try:
+                    opts = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                except Exception:
+                    continue
+                for opt in opts:
+                    try:
+                        if not opt.is_displayed():
+                            continue
+                    except Exception:
+                        continue
+                    t = (opt.text or "").strip()
+                    if not t:
+                        continue
+                    tl = t.lower()
+                    if answer_l in tl or tl in answer_l:
+                        best_click = opt
+                        break
+                    if any(
+                        part in tl
+                        for part in answer_l.split(",")
+                        if len(part.strip()) > 2
+                    ):
+                        best_click = opt
+                        break
+                if best_click:
+                    break
+            if best_click:
+                break
+            time.sleep(0.25)
+
+        try:
+            if best_click:
+                StealthUtils.smooth_scroll_to_element(self.driver, best_click)
+                StealthUtils.human_sleep(0.15, 0.3)
+                best_click.click()
+                logger.info(f"Selected location suggestion: '{(best_click.text or '')[:80]}'")
+                return True
+        except Exception as e:
+            logger.debug(f"Location option click failed: {e}")
+
+        # Keyboard fallback: first suggestion
+        try:
+            StealthUtils.human_sleep(0.2, 0.4)
+            target.send_keys(Keys.ARROW_DOWN)
+            StealthUtils.human_sleep(0.15, 0.25)
+            target.send_keys(Keys.ENTER)
+            logger.info("Applied location via ArrowDown+Enter")
+            return True
+        except Exception as e:
+            logger.debug(f"Location keyboard fallback failed: {e}")
+        return False
+
+    def _open_and_pick_dropdown_option(self, group_element, answer: str) -> bool:
+        """
+        Open a closed LinkedIn/Artdeco dropdown and click the option matching answer.
+        Options are often rendered in a portal (search driver-wide).
+        """
+        if not answer or not str(answer).strip():
+            return False
+        answer_clean = answer.strip().lower()
+        answer_raw = answer.strip()
+
+        trigger_selectors = [
+            "button.artdeco-dropdown__trigger",
+            "button.artdeco-dropdown__button",
+            ".jobs-easy-apply-form-element__dropdown-button button",
+            "button[aria-expanded]",
+            "input[data-test-text-entity-list-input]",
+        ]
+
+        triggers = []
+        for sel in trigger_selectors:
+            triggers.extend(group_element.find_elements(By.CSS_SELECTOR, sel))
+
+        clicked = False
+        for tr in triggers:
+            try:
+                if not tr.is_displayed():
+                    continue
+                StealthUtils.smooth_scroll_to_element(self.driver, tr)
+                StealthUtils.human_sleep(0.15, 0.35)
+                tr.click()
+                clicked = True
+                break
+            except Exception:
+                continue
+
+        if not clicked:
+            return False
+
+        StealthUtils.human_sleep(0.45, 0.9)
+
+        option_selectors = [
+            "[role='listbox'] [role='option']",
+            "[role='menu'] [role='menuitem']",
+            "ul[role='listbox'] li",
+            ".artdeco-dropdown__item",
+            "[data-test-dropdown-option]",
+            "div.artdeco-dropdown__content li",
+        ]
+
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            for osel in option_selectors:
+                try:
+                    opts = self.driver.find_elements(By.CSS_SELECTOR, osel)
+                except Exception:
+                    continue
+                for opt in opts:
+                    try:
+                        if not opt.is_displayed():
+                            continue
+                    except Exception:
+                        continue
+                    t = (opt.text or "").strip()
+                    if not t:
+                        continue
+                    tl = t.lower()
+                    if (
+                        answer_clean == tl
+                        or answer_clean in tl
+                        or tl in answer_clean
+                        or answer_raw == t
+                    ):
+                        try:
+                            StealthUtils.smooth_scroll_to_element(self.driver, opt)
+                            StealthUtils.human_sleep(0.1, 0.2)
+                            opt.click()
+                            logger.info(
+                                f"Selected dropdown option: '{t[:90]}...' (matched answer)"
+                            )
+                            return True
+                        except Exception as e:
+                            logger.debug(f"Dropdown option click failed: {e}")
+            time.sleep(0.2)
+
+        logger.warning(
+            f"Dropdown opened but no matching option for answer (first 60 chars): {answer_raw[:60]!r}"
+        )
+        return False
+
     def _fill_field_with_answer(
         self,
         group_element,
         answer: str,
         input_type: Optional[str] = None,
         options: Optional[List[str]] = None,
+        question_text: Optional[str] = None,
     ):
         """
         Fill a form field with the provided answer, using input-type-specific logic.
@@ -1433,10 +1677,30 @@ class JobApplication:
             answer: The answer to fill (exact option string for select/radio; yes/no for checkbox/toggle; text otherwise)
             input_type: One of "text", "select", "radio", "checkbox", "toggle" (optional; auto-detected if None)
             options: List of allowed options for select/radio (used for exact/partial match)
+            question_text: Optional label text for heuristics (e.g. location typeahead detection)
         """
         try:
             it = (input_type or "").lower()
             answer_clean = (answer or "").strip().lower()
+
+            # LinkedIn location (city) combobox: must choose a suggestion or validation fails
+            if (answer or "").strip() and self._is_location_city_field(
+                group_element, question_text
+            ):
+                if self._fill_location_typeahead(group_element, str(answer).strip()):
+                    return
+
+            # Misclassified closed dropdown (still looks like "text" in some DOMs)
+            if it == "text" and (answer or "").strip():
+                dd_markers = group_element.find_elements(
+                    By.CSS_SELECTOR,
+                    "button.artdeco-dropdown__trigger, button.artdeco-dropdown__button",
+                )
+                if dd_markers and any(m.is_displayed() for m in dd_markers):
+                    if self._open_and_pick_dropdown_option(
+                        group_element, str(answer).strip()
+                    ):
+                        return
 
             # --- Checkbox: check if answer is yes/true, uncheck if no/false ---
             if it == "checkbox":
@@ -1470,11 +1734,12 @@ class JobApplication:
                         logger.debug(f"Toggle set to {'on' if should_be_on else 'off'}: {answer}")
                     return
 
-            # --- Select (native <select>): exact then partial match on option text ---
+            # --- Select: native <select>, visible listbox, then open closed Artdeco dropdown ---
             if it == "select":
                 selects = group_element.find_elements(By.TAG_NAME, "select")
                 if selects and selects[0].is_displayed():
                     from selenium.webdriver.support.ui import Select
+
                     sel = Select(selects[0])
                     for opt in sel.options:
                         t = (opt.text or "").strip()
@@ -1488,7 +1753,6 @@ class JobApplication:
                             sel.select_by_visible_text(t)
                             logger.debug(f"Selected dropdown (partial): {t}")
                             return
-                # Custom dropdown (li / listbox)
                 items = group_element.find_elements(
                     By.CSS_SELECTOR,
                     "[role='listbox'] li, .artdeco-dropdown__item, [data-test-dropdown-option]",
@@ -1502,32 +1766,48 @@ class JobApplication:
                         li.click()
                         logger.debug(f"Selected custom option: {t}")
                         return
+                if (answer or "").strip() and self._open_and_pick_dropdown_option(
+                    group_element, str(answer).strip()
+                ):
+                    return
 
-            # --- Radio: click the option that matches the answer (by label or value) ---
+            # --- Radio: click label (inputs are often visually hidden but still clickable via label) ---
             if it == "radio":
                 radios = group_element.find_elements(By.CSS_SELECTOR, "input[type='radio']")
                 for radio in radios:
-                    if not radio.is_displayed():
-                        continue
                     val = (radio.get_attribute("value") or "").strip().lower()
                     label_text = ""
-                    try:
-                        rid = radio.get_attribute("id")
-                        if rid:
-                            label_el = group_element.find_element(By.CSS_SELECTOR, f"label[for='{rid}']")
-                            label_text = (label_el.text or "").strip().lower()
-                    except Exception:
-                        pass
-                    if answer_clean == val or answer_clean == label_text or answer_clean in label_text or answer_clean in val:
-                        StealthUtils.smooth_scroll_to_element(self.driver, radio)
-                        StealthUtils.human_sleep(0.2, 0.5)
+                    label_el = None
+                    rid = radio.get_attribute("id")
+                    if rid:
                         try:
-                            label_el = group_element.find_element(By.CSS_SELECTOR, f"label[for='{radio.get_attribute('id')}']")
-                            label_el.click()
+                            label_el = group_element.find_element(
+                                By.CSS_SELECTOR, f"label[for='{rid}']"
+                            )
+                            label_text = (label_el.text or "").strip().lower()
                         except Exception:
-                            radio.click()
+                            pass
+                    if not (
+                        answer_clean == val
+                        or (label_text and answer_clean == label_text)
+                        or (label_text and answer_clean in label_text)
+                        or (label_text and label_text in answer_clean)
+                        or answer_clean in val
+                    ):
+                        continue
+                    try:
+                        if label_el:
+                            StealthUtils.smooth_scroll_to_element(self.driver, label_el)
+                            StealthUtils.human_sleep(0.2, 0.45)
+                            label_el.click()
+                        else:
+                            StealthUtils.smooth_scroll_to_element(self.driver, radio)
+                            StealthUtils.human_sleep(0.2, 0.45)
+                            self.driver.execute_script("arguments[0].click();", radio)
                         logger.debug(f"Selected radio: {answer}")
                         return
+                    except Exception as e:
+                        logger.debug(f"Radio click failed: {e}")
 
             # --- Text / default: try text input, then legacy radio/select order ---
             text_inputs = group_element.find_elements(By.TAG_NAME, "input")
